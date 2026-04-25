@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+cache/
+*.nc
+*.nc4
+*.zip
