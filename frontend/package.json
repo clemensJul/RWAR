@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
+    "@mapbox/mapbox-gl-draw": "^1.5.1",
     "@tailwindcss/vite": "^4.2.4",
+    "@turf/turf": "^7.3.5",
     "@types/mapbox-gl": "^3.4.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
