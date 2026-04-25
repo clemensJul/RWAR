@@ -1,22 +1,23 @@
-import Map from 'react-map-gl/mapbox';
-import 'mapbox-gl/dist/mapbox-gl.css';
-
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import Layout from './layout';
+import Dashboard from './pages/Dashboard';
+import Hero from './pages/Hero';
 
 function App() {
   return (
-    <>
-      <Map
-        mapboxAccessToken="<Mapbox access token>"
-        initialViewState={{
-          longitude: -122.4,
-          latitude: 37.8,
-          zoom: 14
-        }}
-        style={{ width: 600, height: 400 }}
-        mapStyle="mapbox://styles/mapbox/streets-v9"
-      />
-    </>
-  )
+    <BrowserRouter>
+      <Routes>
+        {/* 1. Wrap everything in the Layout */}
+        <Route path="/" element={<Layout />}>
+          
+          {/* 2. Define the individual pages */}
+          <Route index element={<Hero />} /> {/* The default page */}
+          <Route path="dashboard" element={<Dashboard />} />
+          
+        </Route>
+      </Routes>
+    </BrowserRouter>
+  );
 }
 
-export default App
+export default App;
