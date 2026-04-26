@@ -13,6 +13,7 @@ from sentinelhub import (
     SHConfig,
     BBox,
     CRS,
+    ResamplingType
 )
 
 load_dotenv()
@@ -55,7 +56,7 @@ def _fetch_dem(bbox: tuple[float, float, float, float], size: tuple[int, int] = 
     """Fetch Copernicus 30 m DEM for *bbox*. Returns a 2-D float32 array (rows, cols)."""
     req = SentinelHubRequest(
         evalscript=DEM_EVALSCRIPT,
-        input_data=[SentinelHubRequest.input_data(data_collection=DEM_COLLECTION)],
+        input_data=[SentinelHubRequest.input_data(data_collection=DEM_COLLECTION,upsampling=ResamplingType.BILINEAR)],
         responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
         bbox=BBox(bbox=bbox, crs=CRS.WGS84),
         size=size,
