@@ -1,6 +1,7 @@
 import math
 import random
 import os
+from datetime import datetime, timedelta
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
@@ -27,6 +28,11 @@ config.sh_base_url  = "https://sh.dataspace.copernicus.eu"
 
 DEM_COLLECTION = DataCollection.DEM_COPERNICUS_30.define_from(
     name="DEM_30_CDSE",
+    service_url="https://sh.dataspace.copernicus.eu",
+)
+
+S2_COLLECTION = DataCollection.SENTINEL2_L2A.define_from(
+    name="S2_L2A_CDSE",
     service_url="https://sh.dataspace.copernicus.eu",
 )
 
@@ -184,7 +190,61 @@ def get_landslide_geojson(bbox: tuple[float, float, float, float]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Risk computation — synthetic (wildfire, drought, extreme_weather)
+# Risk computation — Sentinel-2 vegetation (wildfire)
+# ---------------------------------------------------------------------------
+
+S2_NDVI_EVALSCRIPT = """
+function setup() {
+    return { input: ["B04", "B08"], output: { bands: 1, sampleType: "FLOAT32" } };
+}
+function evaluatePixel(sample) {
+    return [(sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-6)];
+}
+"""
+
+
+def _fetch_ndvi(bbox: tuple[float, float, float, float], size: tuple[int, int] = (256, 256)) -> np.ndarray:
+    """Fetch NDVI from Sentinel-2 L2A (90-day least-cloud mosaic). Returns float32 array."""
+    end   = datetime.utcnow()
+    start = end - timedelta(days=90)
+    req = SentinelHubRequest(
+        evalscript=S2_NDVI_EVALSCRIPT,
+        input_data=[SentinelHubRequest.input_data(
+            data_collection=S2_COLLECTION,
+            time_interval=(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")),
+            mosaicking_order="leastCC",
+            upsampling=ResamplingType.BILINEAR
+        )],
+        responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
+        bbox=BBox(bbox=bbox, crs=CRS.WGS84),
+        size=size,
+        config=config,
+    )
+    arr = np.array(req.get_data()[0], dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[:, :, 0]
+    return arr
+
+
+def get_wildfire_geojson(bbox: tuple[float, float, float, float]) -> dict:
+    """Vegetation density (NDVI) → wildfire fuel load → risk [0, 1]."""
+    ndvi = _fetch_ndvi(bbox)
+    # Replace sentinel nodata (values well outside [-1, 1]) then NaNs
+    ndvi = np.where(np.abs(ndvi) > 2.0, 0.0, ndvi)
+    ndvi = np.nan_to_num(ndvi, nan=0.0)
+    ndvi = np.clip(ndvi, -1.0, 1.0)
+    # Shift [-1, 1] → [0, 1] then min-max normalise within the scene
+    ndvi_01 = (ndvi + 1.0) / 2.0
+    lo, hi = ndvi_01.min(), ndvi_01.max()
+    if hi == lo:
+        risk_grid = np.zeros_like(ndvi_01, dtype=np.float32)
+    else:
+        risk_grid = ((ndvi_01 - lo) / (hi - lo)).astype(np.float32)
+    return _dem_to_geojson(risk_grid, bbox, "wildfire")
+
+
+# ---------------------------------------------------------------------------
+# Risk computation — synthetic (drought, extreme_weather)
 # ---------------------------------------------------------------------------
 
 VALID_TYPES = {"flood", "landslide", "wildfire", "drought", "extreme_weather"}
@@ -305,6 +365,8 @@ def risk_data():
         geojson = get_flood_geojson(bbox)
     elif risk_type == "landslide":
         geojson = get_landslide_geojson(bbox)
+    elif risk_type == "wildfire":
+        geojson = get_wildfire_geojson(bbox)
     else:
         geojson = generate_risk_geojson(bbox, risk_type)
 
