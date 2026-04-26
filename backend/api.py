@@ -3,12 +3,23 @@ import random
 from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from sentinelhub import (
+    DataCollection, 
+    MimeType, 
+    SentinelHubRequest, 
+    SHConfig, 
+    BBox, 
+    CRS
+)
+import os
+
+import cdsapi
+
+
 
 load_dotenv(Path(__file__).parent / ".env")
-sentinel_hub ='https://services.sentinel-hub.com/api/v1/catalog/1.0.0/'
 
 app = Flask(__name__)
-
 
 @app.after_request
 def add_cors_headers(response):
@@ -22,7 +33,7 @@ def add_cors_headers(response):
 # Risk computation
 # ---------------------------------------------------------------------------
 
-VALID_TYPES = {"flood", "landslide", "wildfire", "drought"}
+VALID_TYPES = {"flood", "landslide", "wildfire", "drought", "extreme_weather"}
 
 
 def _deterministic_noise(lng: float, lat: float, salt: int = 0) -> float:
@@ -56,7 +67,19 @@ def _compute_risk(lng: float, lat: float, risk_type: str) -> float:
         low_lying = max(0.0, 1.0 - abs(math.sin(lat * 12.7) * math.cos(lng * 9.3)))
         return min(1.0, low_lying * 0.55 + noise * 0.25 + noise2 * 0.20)
 
+    if risk_type == "extreme_weather":
+        # Combination of tropical storm belt, terrain roughness, and variability
+        tropical = max(0.0, 1.0 - abs(lat - 15) / 40)
+        roughness = abs(math.sin(lat * 5.1)) * abs(math.cos(lng * 3.7))
+        return min(1.0, tropical * 0.4 + roughness * 0.3 + noise * 0.2 + noise2 * 0.1)
+
     return noise
+
+
+def _compute_trend(lng: float, lat: float) -> float:
+    """Return a simulated annual risk trend in [-1, 1]. Positive = worsening."""
+    noise = _deterministic_noise(lng, lat, salt=99)
+    return round(noise * 2 - 1, 3)
 
 def _risk_category(level: float) -> str:
     if level < 0.25:
@@ -118,6 +141,7 @@ def generate_risk_geojson(
                     "risk_level": round(risk, 3),
                     "risk_category": _risk_category(risk),
                     "risk_type": risk_type,
+                    "trend": _compute_trend(center_lng, center_lat),
                 },
             })
 

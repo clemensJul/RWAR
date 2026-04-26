@@ -11,6 +11,7 @@ interface RiskProperties {
   risk_level: number;
   risk_category: string;
   risk_type: string;
+  trend: number;
 }
 
 interface PopupInfo {
@@ -26,6 +27,7 @@ export interface ClimateMapHandle {
 interface ClimateMapProps {
   activeLayers: string[];
   onLoadingChange: (layerId: string, loading: boolean) => void;
+  showTrendlines: boolean;
 }
 
 function buildFillPaint(colors: [string, string, string, string]) {
@@ -39,8 +41,20 @@ function buildFillPaint(colors: [string, string, string, string]) {
   } as mapboxgl.FillPaint;
 }
 
+function buildTrendPaint(): mapboxgl.FillPaint {
+  return {
+    'fill-color': [
+      'interpolate', ['linear'], ['get', 'trend'],
+      -1, '#16a34a',
+      0,  'rgba(255,255,255,0)',
+      1,  '#dc2626',
+    ],
+    'fill-opacity': 0.45,
+  } as mapboxgl.FillPaint;
+}
+
 const ClimateMap = forwardRef<ClimateMapHandle, ClimateMapProps>(
-function ClimateMap({ activeLayers, onLoadingChange }, ref) {
+function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
   const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
   const mapRef  = useRef<MapRef>(null);
   const drawRef = useRef<MapboxDraw | null>(null);
@@ -214,6 +228,9 @@ function ClimateMap({ activeLayers, onLoadingChange }, ref) {
           return (
             <Source key={layer.id} id={layer.id} type="geojson" data={data}>
               <Layer id={`${layer.id}-fill`} type="fill" paint={buildFillPaint(layer.colors)} />
+              {showTrendlines && (
+                <Layer id={`${layer.id}-trend`} type="fill" paint={buildTrendPaint()} />
+              )}
             </Source>
           );
         })}
@@ -221,9 +238,9 @@ function ClimateMap({ activeLayers, onLoadingChange }, ref) {
         {popup && (
           <Popup longitude={popup.lng} latitude={popup.lat}
             onClose={() => setPopup(null)} closeOnClick={false} anchor="bottom">
-            <div className="p-1 min-w-[140px]">
+            <div className="p-1 min-w-[160px]">
               <p className="font-semibold text-slate-800 capitalize text-sm">
-                {popup.properties.risk_type} Risk
+                {popup.properties.risk_type.replace('_', ' ')} Risk
               </p>
               <div className="mt-1 flex items-center gap-2">
                 <div className="w-3 h-3 rounded-full"
@@ -233,6 +250,19 @@ function ClimateMap({ activeLayers, onLoadingChange }, ref) {
                   {Math.round(popup.properties.risk_level * 100)}%
                 </span>
               </div>
+              {popup.properties.trend != null && (
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <span
+                    className="text-xs font-semibold"
+                    style={{ color: popup.properties.trend > 0.1 ? '#dc2626' : popup.properties.trend < -0.1 ? '#16a34a' : '#9c9184' }}
+                  >
+                    {popup.properties.trend > 0.1 ? '▲ Worsening' : popup.properties.trend < -0.1 ? '▼ Improving' : '→ Stable'}
+                  </span>
+                  <span className="text-xs text-slate-400 ml-auto">
+                    {popup.properties.trend > 0 ? '+' : ''}{Math.round(popup.properties.trend * 100)}%/yr
+                  </span>
+                </div>
+              )}
             </div>
           </Popup>
         )}

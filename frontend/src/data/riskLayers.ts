@@ -41,4 +41,12 @@ export const RISK_LAYERS: RiskLayerDef[] = [
     colors: ['#fef9c3', '#eab308', '#a16207', '#713f12'],
     apiType: 'drought',
   },
+  {
+    id: 'extreme_weather',
+    name: 'Extreme Weather',
+    description: 'Likelihood of extreme weather events including storms and heatwaves',
+    icon: 'CloudLightning',
+    colors: ['#f3e8ff', '#a855f7', '#7e22ce', '#4c1d95'],
+    apiType: 'extreme_weather',
+  },
 ];
