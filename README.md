@@ -66,17 +66,6 @@ RAWR is a **3D Digital Twin** of any property, overlaid with climate risk data l
 
 ---
 
-## The Team
-
-| Name | Role | Background |
-|---|---|---|
-| Clemens Blum | CEO | WINF BSc |
-| Jana Grabher | CTO | Technical Informatics MSc |
-| Lucas Hämmerle | CBO & CMO | WINF MSc |
-| Kevin Lingenhel | CDO | BSc Mathematics |
-
----
-
 ## Stack
 
 ```
