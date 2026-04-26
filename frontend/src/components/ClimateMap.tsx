@@ -36,8 +36,11 @@ function buildFillPaint(colors: [string, string, string, string]) {
       'interpolate', ['linear'], ['get', 'risk_level'],
       0, colors[0], 0.33, colors[1], 0.66, colors[2], 1.0, colors[3],
     ],
-    'fill-opacity': 0.65,
-    'fill-outline-color': 'rgba(0,0,0,0.08)',
+    'fill-opacity': [
+      'interpolate', ['linear'], ['get', 'risk_level'],
+      0, 0.18, 0.1, 0.35, 1.0, 0.65,
+    ],
+    'fill-outline-color': 'rgba(0,0,0,0.04)',
   } as mapboxgl.FillPaint;
 }
 
@@ -63,6 +66,7 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
   const [popup, setPopup]         = useState<PopupInfo | null>(null);
   const [roundedArea, setRoundedArea]   = useState<number | null>(null);
   const [drawnPolygon, setDrawnPolygon] = useState<GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon> | null>(null);
+  const [purchaseState, setPurchaseState] = useState<'idle' | 'success'>('idle');
 
   const loadedRef        = useRef<Set<string>>(new Set());
   const retryRef         = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -77,25 +81,14 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
     },
   }));
 
-  const viewportBbox = useCallback((): string => {
-    const b = mapRef.current?.getMap()?.getBounds();
-    if (b) return `${b.getWest().toFixed(4)},${b.getSouth().toFixed(4)},${b.getEast().toFixed(4)},${b.getNorth().toFixed(4)}`;
-    return '16.18,48.12,16.58,48.32';
-  }, []);
-
-  const currentBbox = useCallback((): string => {
-    // When a polygon is drawn, use its tight bbox so the API only fetches
-    // data for that area — not the whole visible map.
-    return polygonBboxRef.current ?? viewportBbox();
-  }, [viewportBbox]);
-
   const fetchLayerData = useCallback(async (layerId: string) => {
+    if (!polygonBboxRef.current) return;
     const layer = RISK_LAYERS.find(l => l.id === layerId);
     if (!layer) return;
 
     onLoadingChange(layerId, true);
     try {
-      const res  = await fetch(`${API_BASE}/api/risk-data?type=${layer.apiType}&bbox=${currentBbox()}`);
+      const res  = await fetch(`${API_BASE}/api/risk-data?type=${layer.apiType}&bbox=${polygonBboxRef.current}`);
       const data = await res.json() as GeoJSON.FeatureCollection & { status?: string };
 
       if (data.status === 'loading') {
@@ -114,7 +107,7 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
         onLoadingChange(layerId, false);
       }
     }
-  }, [onLoadingChange, currentBbox]);
+  }, [onLoadingChange]);
 
   useEffect(() => { activeLayersRef.current = activeLayers;   }, [activeLayers]);
   useEffect(() => { fetchLayerRef.current   = fetchLayerData; }, [fetchLayerData]);
@@ -130,14 +123,7 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
     });
   }, [activeLayers, fetchLayerData]);
 
-  const handleMoveEnd = useCallback(() => {
-    if (polygonBboxRef.current) return;
-    activeLayers.forEach(id => fetchLayerData(id));
-  }, [activeLayers, fetchLayerData]);
-
   const handleLoad = useCallback(() => {
-    activeLayers.forEach(id => fetchLayerData(id));
-
     const map = mapRef.current?.getMap();
     if (!map) return;
 
@@ -181,7 +167,11 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
       } else {
         setRoundedArea(null);
         setDrawnPolygon(null);
+        setLayerData({});
+        setPurchaseState('idle');
         polygonBboxRef.current = null;
+        loadedRef.current.clear();
+        return;
       }
 
       // Use live refs so this callback always sees the current layers,
@@ -205,7 +195,10 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
     });
   }, []);
 
-  const activeLayerFillIds = useMemo(() => activeLayers.map(id => `${id}-fill`), [activeLayers]);
+  const activeLayerFillIds = useMemo(
+    () => drawnPolygon ? activeLayers.map(id => `${id}-fill`) : [],
+    [activeLayers, drawnPolygon],
+  );
 
   const filteredLayerData = useMemo(() => {
     if (!drawnPolygon) return layerData;
@@ -233,7 +226,6 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
         interactiveLayerIds={activeLayerFillIds}
         onClick={handleMapClick}
         onLoad={handleLoad}
-        onMoveEnd={handleMoveEnd}
       >
         {RISK_LAYERS.filter(l => activeLayers.includes(l.id)).map(layer => {
           const data = filteredLayerData[layer.id];
@@ -281,26 +273,122 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
         )}
       </Map>
 
-      <div
-        style={{
+      {roundedArea == null ? (
+        <div style={{
           position: 'absolute', bottom: 40, left: 10, zIndex: 10,
           background: 'rgba(250,248,244,0.92)', borderRadius: 10,
           padding: '10px 14px', minWidth: 150, textAlign: 'center',
           border: '1px solid #e8e0d0', boxShadow: '0 2px 8px rgba(28,26,23,0.08)',
           fontSize: 12, color: '#1c1a17',
-        }}
-      >
-        <p style={{ margin: 0 }}>Draw a polygon on the map.</p>
-        {roundedArea != null && (
-          <div style={{ marginTop: 6 }}>
-            <p style={{ margin: 0, fontWeight: 700, fontSize: 14 }}>{roundedArea.toLocaleString()}</p>
-            <p style={{ margin: 0, color: '#9c9184' }}>square meters</p>
-          </div>
-        )}
-      </div>
+        }}>
+          <p style={{ margin: 0 }}>Draw a polygon on the map.</p>
+        </div>
+      ) : (
+        <div style={{
+          position: 'absolute', bottom: 40, left: 10, zIndex: 10,
+          background: '#fff', borderRadius: 14,
+          padding: '16px 18px', minWidth: 220,
+          border: '1.5px solid #e2e8f0',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.13)',
+          fontFamily: 'inherit',
+        }}>
+          {purchaseState === 'success' ? (
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 36, marginBottom: 6 }}>✅</div>
+              <p style={{ margin: 0, fontWeight: 700, fontSize: 15, color: '#15803d' }}>Purchase Successful!</p>
+              <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+                Your climate zone license has been activated.
+              </p>
+              <p style={{ margin: '2px 0 10px', fontSize: 11, color: '#94a3b8' }}>
+                Order confirmation sent to your email.
+              </p>
+              <button
+                onClick={() => {
+                  const draw = drawRef.current;
+                  if (draw) draw.deleteAll();
+                  setRoundedArea(null);
+                  setDrawnPolygon(null);
+                  setPurchaseState('idle');
+                  polygonBboxRef.current = null;
+                  loadedRef.current.clear();
+                  activeLayersRef.current.forEach(id => fetchLayerRef.current(id));
+                }}
+                style={{
+                  width: '100%', padding: '7px 0', borderRadius: 8,
+                  border: '1px solid #e2e8f0', background: '#f8fafc',
+                  color: '#475569', fontSize: 12, cursor: 'pointer',
+                }}
+              >
+                Clear &amp; Draw New Zone
+              </button>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 20 }}>🗺️</span>
+                <span style={{ fontWeight: 700, fontSize: 14, color: '#1e293b' }}>Zone Selected</span>
+              </div>
+
+              <div style={{ background: '#f8fafc', borderRadius: 8, padding: '8px 10px', marginBottom: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b', marginBottom: 2 }}>
+                  <span>Area</span>
+                  <span>{roundedArea >= 10000
+                    ? `${(roundedArea / 10000).toFixed(2)} ha`
+                    : `${Math.round(roundedArea).toLocaleString()} m²`}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b' }}>
+                  <span>Coverage</span>
+                  <span>{(roundedArea / 1_000_000).toFixed(4)} km²</span>
+                </div>
+              </div>
+
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                background: 'linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%)',
+                borderRadius: 10, padding: '10px 12px', marginBottom: 12,
+              }}>
+                <div>
+                  <p style={{ margin: 0, fontSize: 10, color: '#94a3b8', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                    Zone License
+                  </p>
+                  <p style={{ margin: '2px 0 0', fontSize: 22, fontWeight: 800, color: '#fff' }}>
+                    {formatPrice(roundedArea)}
+                  </p>
+                </div>
+                <span style={{ fontSize: 28 }}>🏷️</span>
+              </div>
+
+              <p style={{ margin: '0 0 10px', fontSize: 10, color: '#94a3b8', lineHeight: 1.4 }}>
+                Includes climate risk data access, satellite imagery, and trend analysis for the selected zone.
+              </p>
+
+              <button
+                onClick={() => setPurchaseState('success')}
+                style={{
+                  width: '100%', padding: '10px 0', borderRadius: 9,
+                  border: 'none',
+                  background: 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)',
+                  color: '#fff', fontWeight: 700, fontSize: 14,
+                  cursor: 'pointer', letterSpacing: '0.01em',
+                  boxShadow: '0 2px 8px rgba(22,163,74,0.35)',
+                }}
+              >
+                Buy Zone License
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 });
+
+function formatPrice(areaM2: number): string {
+  const hectares = areaM2 / 10000;
+  const price = Math.max(9.99, Math.ceil(hectares) * 12.99);
+  return `€${price.toFixed(2)}`;
+}
 
 function riskColor(level: number): string {
   if (level < 0.25) return '#22c55e';

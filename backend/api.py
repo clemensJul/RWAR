@@ -3,6 +3,7 @@ import random
 import os
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from sentinelhub import (
@@ -81,8 +82,6 @@ def _dem_to_geojson(risk_grid: np.ndarray, bbox: tuple, risk_type: str) -> dict:
     for r in range(rows):
         for c in range(cols):
             risk = float(risk_grid[r, c])
-            if risk < 0.10:
-                continue
             lng1 = min_lng + c * lng_step
             lat2 = max_lat - r * lat_step        # rasters are top-down
             lat1 = lat2 - lat_step
@@ -123,8 +122,9 @@ def get_flood_geojson(bbox: tuple[float, float, float, float]) -> dict:
 
 def get_landslide_geojson(bbox: tuple[float, float, float, float]) -> dict:
     """Steep gradient → high landslide risk.
-    Bbox is expanded by 1 pixel on every side before fetching so that
-    the gradient at the original boundary is computed from real neighbours.
+    Gradient is estimated as the average forward difference over up to 5
+    neighbours in x and y independently.  Bbox is expanded by 5 pixels on
+    every side so that boundary cells get full 5-step stencils from real data.
     """
     size = (256, 256)
     cols, rows = size
@@ -132,23 +132,52 @@ def get_landslide_geojson(bbox: tuple[float, float, float, float]) -> dict:
     lng_step = (max_lng - min_lng) / cols
     lat_step = (max_lat - min_lat) / rows
 
-    # Expand by exactly 1 pixel on each side
+    pad = 5
     exp_bbox = (
-        min_lng - lng_step,
-        min_lat - lat_step,
-        max_lng + lng_step,
-        max_lat + lat_step,
+        min_lng - pad * lng_step,
+        min_lat - pad * lat_step,
+        max_lng + pad * lng_step,
+        max_lat + pad * lat_step,
     )
-    dem = _fetch_dem(exp_bbox, size=(cols + 2, rows + 2))
+    dem = _fetch_dem(exp_bbox, size=(cols + 2 * pad, rows + 2 * pad))
     dem = np.nan_to_num(dem, nan=float(np.nanmean(dem)))
+    dem = gaussian_filter(dem, sigma=12)
 
-    grad_y, grad_x = np.gradient(dem)
+    h, w = dem.shape
+
+    # Average forward difference in x (column) direction over offsets 1..5
+    grad_x = np.zeros_like(dem, dtype=np.float64)
+    count_x = np.zeros((1, w), dtype=np.float64)
+    for k in range(1, 6):
+        valid = w - k
+        if valid <= 0:
+            break
+        grad_x[:, :valid] += dem[:, k:k + valid] - dem[:, :valid]
+        count_x[0, :valid] += 1
+    grad_x /= np.maximum(count_x, 1)
+
+    # Average forward difference in y (row) direction over offsets 1..5
+    grad_y = np.zeros_like(dem, dtype=np.float64)
+    count_y = np.zeros((h, 1), dtype=np.float64)
+    for k in range(1, 6):
+        valid = h - k
+        if valid <= 0:
+            break
+        grad_y[:valid, :] += dem[k:k + valid, :] - dem[:valid, :]
+        count_y[:valid, 0] += 1
+    grad_y /= np.maximum(count_y, 1)
+
     magnitude = np.sqrt(grad_x ** 2 + grad_y ** 2)
 
-    # Trim the 1-pixel border back to original size
-    magnitude = magnitude[1:-1, 1:-1]
-    hi = magnitude.max()
-    risk_grid = np.clip(magnitude / hi, 0.0, 1.0).astype(np.float32) if hi > 0 else np.zeros_like(magnitude, dtype=np.float32)
+    # Trim padding back to original size
+    magnitude = magnitude[pad:-pad, pad:-pad]
+
+    # Min-max normalise to [0, 1]
+    lo, hi = magnitude.min(), magnitude.max()
+    if hi == lo:
+        risk_grid = np.zeros_like(magnitude, dtype=np.float32)
+    else:
+        risk_grid = ((magnitude - lo) / (hi - lo)).astype(np.float32)
 
     return _dem_to_geojson(risk_grid, bbox, "landslide")
 
