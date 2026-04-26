@@ -130,6 +130,26 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
     const draw = new MapboxDraw({
       displayControlsDefault: false,
       controls: { polygon: true, trash: true },
+      styles: [
+        // filled polygon
+        { id: 'gl-draw-polygon-fill', type: 'fill', filter: ['all', ['==', '$type', 'Polygon'], ['!=', 'mode', 'static']],
+          paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.15 } },
+        // polygon outline while drawing
+        { id: 'gl-draw-polygon-stroke-active', type: 'line', filter: ['all', ['==', '$type', 'Polygon'], ['!=', 'mode', 'static']],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#3b82f6', 'line-width': 2, 'line-dasharray': [2, 1] } },
+        // completed polygon outline
+        { id: 'gl-draw-polygon-stroke-static', type: 'line', filter: ['all', ['==', '$type', 'Polygon'], ['==', 'mode', 'static']],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#3b82f6', 'line-width': 2 } },
+        // midpoints
+        { id: 'gl-draw-polygon-midpoint', type: 'circle', filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'midpoint']],
+          paint: { 'circle-radius': 4, 'circle-color': '#93c5fd' } },
+        // vertex points
+        { id: 'gl-draw-polygon-and-line-vertex-active', type: 'circle',
+          filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'vertex'], ['!=', 'mode', 'static']],
+          paint: { 'circle-radius': 5, 'circle-color': '#fff', 'circle-stroke-color': '#3b82f6', 'circle-stroke-width': 2 } },
+      ],
     });
     drawRef.current = draw;
     map.addControl(draw);
@@ -222,7 +242,7 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
         mapboxAccessToken={MAPBOX_TOKEN}
         initialViewState={{ longitude: 16.3738, latitude: 48.2082, zoom: 11 }}
         style={{ width: '100%', height: '100%' }}
-        mapStyle="mapbox://styles/mapbox/light-v11"
+        mapStyle="mapbox://styles/mapbox/outdoors-v12" //mapbox://styles/mapbox/light-v11
         interactiveLayerIds={activeLayerFillIds}
         onClick={handleMapClick}
         onLoad={handleLoad}
