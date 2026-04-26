@@ -64,9 +64,12 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
   const [roundedArea, setRoundedArea]   = useState<number | null>(null);
   const [drawnPolygon, setDrawnPolygon] = useState<GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon> | null>(null);
 
-  const loadedRef      = useRef<Set<string>>(new Set());
-  const retryRef       = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const polygonBboxRef = useRef<string | null>(null);
+  const loadedRef        = useRef<Set<string>>(new Set());
+  const retryRef         = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const polygonBboxRef   = useRef<string | null>(null);
+  // Always-current references so draw event callbacks never see stale closures
+  const activeLayersRef  = useRef<string[]>(activeLayers);
+  const fetchLayerRef    = useRef<(id: string) => void>(() => {});
 
   useImperativeHandle(ref, () => ({
     flyTo: (longitude, latitude, zoom = 13) => {
@@ -74,12 +77,17 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
     },
   }));
 
-  const currentBbox = useCallback((): string => {
-    if (polygonBboxRef.current) return polygonBboxRef.current;
+  const viewportBbox = useCallback((): string => {
     const b = mapRef.current?.getMap()?.getBounds();
     if (b) return `${b.getWest().toFixed(4)},${b.getSouth().toFixed(4)},${b.getEast().toFixed(4)},${b.getNorth().toFixed(4)}`;
     return '16.18,48.12,16.58,48.32';
   }, []);
+
+  const currentBbox = useCallback((): string => {
+    // When a polygon is drawn, use its tight bbox so the API only fetches
+    // data for that area — not the whole visible map.
+    return polygonBboxRef.current ?? viewportBbox();
+  }, [viewportBbox]);
 
   const fetchLayerData = useCallback(async (layerId: string) => {
     const layer = RISK_LAYERS.find(l => l.id === layerId);
@@ -107,6 +115,9 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
       }
     }
   }, [onLoadingChange, currentBbox]);
+
+  useEffect(() => { activeLayersRef.current = activeLayers;   }, [activeLayers]);
+  useEffect(() => { fetchLayerRef.current   = fetchLayerData; }, [fetchLayerData]);
 
   useEffect(() => {
     activeLayers.forEach(id => { if (!loadedRef.current.has(id)) fetchLayerData(id); });
@@ -143,7 +154,7 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
         const area = turf.area(data);
         setRoundedArea(Math.round(area * 100) / 100);
 
-        // Derive bbox from all polygon coordinates
+        // Compute tight bbox from the drawn polygon coordinates only
         const coords = data.features.flatMap(f => {
           const geom = f.geometry as GeoJSON.Polygon | GeoJSON.MultiPolygon;
           if (geom.type === 'Polygon') return geom.coordinates.flat();
@@ -152,13 +163,13 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
         });
         const lngs = coords.map(c => c[0]);
         const lats = coords.map(c => c[1]);
-        const minLng = Math.min(...lngs).toFixed(4);
-        const minLat = Math.min(...lats).toFixed(4);
-        const maxLng = Math.max(...lngs).toFixed(4);
-        const maxLat = Math.max(...lats).toFixed(4);
-        polygonBboxRef.current = `${minLng},${minLat},${maxLng},${maxLat}`;
+        polygonBboxRef.current = [
+          Math.min(...lngs).toFixed(4),
+          Math.min(...lats).toFixed(4),
+          Math.max(...lngs).toFixed(4),
+          Math.max(...lats).toFixed(4),
+        ].join(',');
 
-        // Union all drawn features into one polygon for intersection filtering
         const merged = data.features.reduce<GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon> | null>(
           (acc, f) => {
             const feat = f as GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>;
@@ -173,14 +184,16 @@ function ClimateMap({ activeLayers, onLoadingChange, showTrendlines }, ref) {
         polygonBboxRef.current = null;
       }
 
+      // Use live refs so this callback always sees the current layers,
+      // even if activeLayers changed since handleLoad first ran.
       loadedRef.current.clear();
-      activeLayers.forEach(id => fetchLayerData(id));
+      activeLayersRef.current.forEach(id => fetchLayerRef.current(id));
     }
 
     map.on('draw.create', updateArea);
     map.on('draw.delete', updateArea);
     map.on('draw.update', updateArea);
-  }, [activeLayers, fetchLayerData]);
+  }, []);
 
   const handleMapClick = useCallback((event: mapboxgl.MapMouseEvent & { features?: mapboxgl.MapboxGeoJSONFeature[] }) => {
     const features = event.features;

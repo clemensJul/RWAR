@@ -1,23 +1,32 @@
 import math
 import random
-from pathlib import Path
+import os
+
+import numpy as np
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from sentinelhub import (
-    DataCollection, 
-    MimeType, 
-    SentinelHubRequest, 
-    SHConfig, 
-    BBox, 
-    CRS
+    DataCollection,
+    MimeType,
+    SentinelHubRequest,
+    SHConfig,
+    BBox,
+    CRS,
 )
-import os
 
-import cdsapi
+load_dotenv()
 
+# Module-level SentinelHub setup — matches test.py exactly
+config = SHConfig()
+config.sh_client_id     = os.environ.get("SH_CLIENT_ID")
+config.sh_client_secret = os.environ.get("SH_CLIENT_SECRET")
+config.sh_token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+config.sh_base_url  = "https://sh.dataspace.copernicus.eu"
 
-
-load_dotenv(Path(__file__).parent / ".env")
+DEM_COLLECTION = DataCollection.DEM_COPERNICUS_30.define_from(
+    name="DEM_30_CDSE",
+    service_url="https://sh.dataspace.copernicus.eu",
+)
 
 app = Flask(__name__)
 
@@ -30,46 +39,146 @@ def add_cors_headers(response):
 
 
 # ---------------------------------------------------------------------------
-# Risk computation
+# SentinelHub helpers
+# ---------------------------------------------------------------------------
+
+DEM_EVALSCRIPT = """
+function setup() {
+    return { input: ["DEM"], output: { bands: 1, sampleType: "FLOAT32" } };
+}
+function evaluatePixel(sample) { return [sample.DEM]; }
+"""
+
+
+def _fetch_dem(bbox: tuple[float, float, float, float], size: tuple[int, int] = (256, 256)) -> np.ndarray:
+    """Fetch Copernicus 30 m DEM for *bbox*. Returns a 2-D float32 array (rows, cols)."""
+    req = SentinelHubRequest(
+        evalscript=DEM_EVALSCRIPT,
+        input_data=[SentinelHubRequest.input_data(data_collection=DEM_COLLECTION)],
+        responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
+        bbox=BBox(bbox=bbox, crs=CRS.WGS84),
+        size=size,
+        config=config,
+    )
+    arr = np.array(req.get_data()[0], dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[:, :, 0]
+    return arr
+
+
+# ---------------------------------------------------------------------------
+# Risk computation — DEM-based (flood & landslide)
+# ---------------------------------------------------------------------------
+
+def _dem_to_geojson(risk_grid: np.ndarray, bbox: tuple, risk_type: str) -> dict:
+    """Convert a 2-D risk grid [0,1] into a GeoJSON FeatureCollection."""
+    min_lng, min_lat, max_lng, max_lat = bbox
+    rows, cols = risk_grid.shape
+    lng_step = (max_lng - min_lng) / cols
+    lat_step = (max_lat - min_lat) / rows
+
+    features = []
+    for r in range(rows):
+        for c in range(cols):
+            risk = float(risk_grid[r, c])
+            if risk < 0.10:
+                continue
+            lng1 = min_lng + c * lng_step
+            lat2 = max_lat - r * lat_step        # rasters are top-down
+            lat1 = lat2 - lat_step
+            lng2 = lng1 + lng_step
+            center_lng = (lng1 + lng2) / 2
+            center_lat = (lat1 + lat2) / 2
+            features.append({
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [lng1, lat1], [lng2, lat1],
+                        [lng2, lat2], [lng1, lat2],
+                        [lng1, lat1],
+                    ]],
+                },
+                "properties": {
+                    "risk_level":    round(risk, 3),
+                    "risk_category": _risk_category(risk),
+                    "risk_type":     risk_type,
+                    "trend":         _compute_trend(center_lng, center_lat),
+                },
+            })
+    return {"type": "FeatureCollection", "features": features}
+
+
+def get_flood_geojson(bbox: tuple[float, float, float, float]) -> dict:
+    """Low elevation → high flood risk (normalised, inverted DEM)."""
+    dem = _fetch_dem(bbox)
+    dem = np.nan_to_num(dem, nan=float(np.nanmean(dem)))
+    lo, hi = dem.min(), dem.max()
+    if hi == lo:
+        risk_grid = np.zeros_like(dem, dtype=np.float32)
+    else:
+        risk_grid = 1.0 - (dem - lo) / (hi - lo)
+    return _dem_to_geojson(risk_grid, bbox, "flood")
+
+
+def get_landslide_geojson(bbox: tuple[float, float, float, float]) -> dict:
+    """Steep gradient → high landslide risk.
+    Bbox is expanded by 1 pixel on every side before fetching so that
+    the gradient at the original boundary is computed from real neighbours.
+    """
+    size = (256, 256)
+    cols, rows = size
+    min_lng, min_lat, max_lng, max_lat = bbox
+    lng_step = (max_lng - min_lng) / cols
+    lat_step = (max_lat - min_lat) / rows
+
+    # Expand by exactly 1 pixel on each side
+    exp_bbox = (
+        min_lng - lng_step,
+        min_lat - lat_step,
+        max_lng + lng_step,
+        max_lat + lat_step,
+    )
+    dem = _fetch_dem(exp_bbox, size=(cols + 2, rows + 2))
+    dem = np.nan_to_num(dem, nan=float(np.nanmean(dem)))
+
+    grad_y, grad_x = np.gradient(dem)
+    magnitude = np.sqrt(grad_x ** 2 + grad_y ** 2)
+
+    # Trim the 1-pixel border back to original size
+    magnitude = magnitude[1:-1, 1:-1]
+    hi = magnitude.max()
+    risk_grid = np.clip(magnitude / hi, 0.0, 1.0).astype(np.float32) if hi > 0 else np.zeros_like(magnitude, dtype=np.float32)
+
+    return _dem_to_geojson(risk_grid, bbox, "landslide")
+
+
+# ---------------------------------------------------------------------------
+# Risk computation — synthetic (wildfire, drought, extreme_weather)
 # ---------------------------------------------------------------------------
 
 VALID_TYPES = {"flood", "landslide", "wildfire", "drought", "extreme_weather"}
 
 
 def _deterministic_noise(lng: float, lat: float, salt: int = 0) -> float:
-    """Return a repeatable pseudo-random float in [0, 1] for a given cell."""
     seed = int((lng * 1000 + lat * 1000 + salt) * 7919) % 100003
-    rng = random.Random(seed)
-    return rng.random()
+    return random.Random(seed).random()
 
 
 def _compute_risk(lng: float, lat: float, risk_type: str) -> float:
     noise  = _deterministic_noise(lng, lat)
     noise2 = _deterministic_noise(lng, lat, salt=1)
 
-    if risk_type == "landslide":
-        # Terrain-roughness proxy via trig variation — spatially diverse globally
-        roughness = abs(math.sin(lat * 7.3)) * abs(math.cos(lng * 5.1))
-        return min(1.0, roughness * 0.6 + noise * 0.4)
-
     if risk_type == "wildfire":
-        # Higher risk in subtropical bands (~30-45°N/S), modulated by noise
         lat_band = max(0.0, 1.0 - abs(lat - 38) / 25)
         return min(1.0, lat_band * 0.5 + noise * 0.3 + noise2 * 0.2)
 
     if risk_type == "drought":
-        # Higher risk in drier subtropical belt (~20-40°N/S)
         lat_band = max(0.0, 1.0 - abs(lat - 30) / 28)
         return min(1.0, lat_band * 0.4 + noise * 0.35 + noise2 * 0.25)
 
-    if risk_type == "flood":
-        # Higher risk near low-lying areas and river corridors (trig proxy)
-        low_lying = max(0.0, 1.0 - abs(math.sin(lat * 12.7) * math.cos(lng * 9.3)))
-        return min(1.0, low_lying * 0.55 + noise * 0.25 + noise2 * 0.20)
-
     if risk_type == "extreme_weather":
-        # Combination of tropical storm belt, terrain roughness, and variability
-        tropical = max(0.0, 1.0 - abs(lat - 15) / 40)
+        tropical  = max(0.0, 1.0 - abs(lat - 15) / 40)
         roughness = abs(math.sin(lat * 5.1)) * abs(math.cos(lng * 3.7))
         return min(1.0, tropical * 0.4 + roughness * 0.3 + noise * 0.2 + noise2 * 0.1)
 
@@ -77,34 +186,25 @@ def _compute_risk(lng: float, lat: float, risk_type: str) -> float:
 
 
 def _compute_trend(lng: float, lat: float) -> float:
-    """Return a simulated annual risk trend in [-1, 1]. Positive = worsening."""
     noise = _deterministic_noise(lng, lat, salt=99)
     return round(noise * 2 - 1, 3)
 
+
 def _risk_category(level: float) -> str:
-    if level < 0.25:
-        return "Low"
-    if level < 0.50:
-        return "Medium"
-    if level < 0.75:
-        return "High"
+    if level < 0.25: return "Low"
+    if level < 0.50: return "Medium"
+    if level < 0.75: return "High"
     return "Extreme"
 
 
-
-
 def _grid_size(lng_span: float, lat_span: float) -> tuple[int, int]:
-    """Choose grid dimensions so each cell is ~0.001° (~100 m), capped at 500."""
     target = 0.001
     cols = max(50, min(500, int(lng_span / target)))
     rows = max(50, min(500, int(lat_span / target)))
     return cols, rows
 
 
-def generate_risk_geojson(
-    bbox: tuple[float, float, float, float],
-    risk_type: str,
-) -> dict:
+def generate_risk_geojson(bbox: tuple[float, float, float, float], risk_type: str) -> dict:
     min_lng, min_lat, max_lng, max_lat = bbox
     lng_span = max_lng - min_lng
     lat_span = max_lat - min_lat
@@ -119,7 +219,6 @@ def generate_risk_geojson(
             lat1 = min_lat + j * lat_step
             lng2 = lng1 + lng_step
             lat2 = lat1 + lat_step
-
             center_lng = (lng1 + lng2) / 2
             center_lat = (lat1 + lat2) / 2
 
@@ -138,18 +237,19 @@ def generate_risk_geojson(
                     ]],
                 },
                 "properties": {
-                    "risk_level": round(risk, 3),
+                    "risk_level":    round(risk, 3),
                     "risk_category": _risk_category(risk),
-                    "risk_type": risk_type,
-                    "trend": _compute_trend(center_lng, center_lat),
+                    "risk_type":     risk_type,
+                    "trend":         _compute_trend(center_lng, center_lat),
                 },
             })
 
     return {"type": "FeatureCollection", "features": features}
 
 
-def get_flood_geojson(bbox: tuple[float, float, float, float]) -> dict:
-    return generate_risk_geojson(bbox, "flood")
+# ---------------------------------------------------------------------------
+# Route
+# ---------------------------------------------------------------------------
 
 @app.route("/api/risk-data")
 def risk_data():
@@ -162,11 +262,10 @@ def risk_data():
         parts = [float(x) for x in bbox_raw.split(",")]
         if len(parts) != 4:
             raise ValueError
-        bbox = tuple(parts)  # (minLng, minLat, maxLng, maxLat)
+        bbox = tuple(parts)
     except ValueError:
         return jsonify(error="'bbox' must be four comma-separated floats: minLng,minLat,maxLng,maxLat"), 400
 
-    # Guard against unreasonably large bounding boxes
     lng_span = abs(bbox[2] - bbox[0])
     lat_span = abs(bbox[3] - bbox[1])
     if lng_span > 30 or lat_span > 30:
@@ -174,8 +273,11 @@ def risk_data():
 
     if risk_type == "flood":
         geojson = get_flood_geojson(bbox)
+    elif risk_type == "landslide":
+        geojson = get_landslide_geojson(bbox)
     else:
         geojson = generate_risk_geojson(bbox, risk_type)
+
     return jsonify(geojson)
 
 
